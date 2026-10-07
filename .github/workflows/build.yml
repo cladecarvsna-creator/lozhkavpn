@@ -51,9 +51,10 @@ jobs:
           channel: stable
       - name: generate platform files
         run: flutter create --project-name lozhka --org com.lozhka --platforms ios .
-      - name: build ios (simulator)
-        run: flutter build ios --release --simulator
+      - run: flutter pub get
+      - name: build ios (debug, no codesign)
+        run: flutter build ios --debug --no-codesign
       - uses: actions/upload-artifact@v4
         with:
-          name: lozhka-ios-simulator
-          path: build/ios/iphonesimulator/Runner.app
+          name: lozhka-ios
+          path: build/ios/iphoneos/Runner.app

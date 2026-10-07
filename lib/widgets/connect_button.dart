@@ -69,7 +69,7 @@ class _ConnectButtonState extends State<ConnectButton> with SingleTickerProvider
       },
       onTapCancel: () => setState(() => _pressed = false),
       child: AnimatedBuilder(
-        animation: _pulseController,
+        listenable: _pulseController,
         builder: (context, child) {
           final glowOpacity = widget.connected ? (_pulseController.value * 0.3 + 0.1) : 0.0;
           return Container(
