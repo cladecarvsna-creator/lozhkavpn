@@ -42,7 +42,12 @@ jobs:
 
       - name: patch gradle
         run: |
-          sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 21/' android/app/build.gradle
+          # handle both build.gradle and build.gradle.kts
+          if [ -f android/app/build.gradle.kts ]; then
+            sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 21/' android/app/build.gradle.kts
+          elif [ -f android/app/build.gradle ]; then
+            sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 21/' android/app/build.gradle
+          fi
 
       - run: flutter pub get
       - run: flutter build apk --release
