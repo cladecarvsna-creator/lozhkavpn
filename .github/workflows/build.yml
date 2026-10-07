@@ -33,18 +33,15 @@ jobs:
           sed -i 's|</application>|<service android:name=".LozhkaVpnService" android:permission="android.permission.BIND_VPN_SERVICE" android:exported="false"><intent-filter><action android:name="android.net.VpnService"/></intent-filter></service></application>|' android/app/src/main/AndroidManifest.xml
           sed -i 's|</manifest>|<uses-permission android:name="android.permission.INTERNET"/><uses-permission android:name="android.permission.FOREGROUND_SERVICE"/><uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/></manifest>|' android/app/src/main/AndroidManifest.xml
 
-      - name: download libbox.aar
+      - name: download sing-box binary for android
         run: |
-          wget -q "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/libbox-${SINGBOX_VERSION}.aar" -O /tmp/libbox.aar
-          mkdir -p android/app/libs
-          cp /tmp/libbox.aar android/app/libs/libbox.aar
+          wget -q "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-android-arm64.tar.gz" -O /tmp/singbox.tar.gz
+          cd /tmp && tar xzf singbox.tar.gz
+          mkdir -p android/app/src/main/assets
+          cp /tmp/sing-box-${SINGBOX_VERSION}-android-arm64/sing-box android/app/src/main/assets/sing-box
 
-      - name: patch gradle for libbox
+      - name: patch gradle
         run: |
-          # Add flatDir repo and libbox dependency
-          sed -i '/repositories {/a\        flatDir { dirs "libs" }' android/app/build.gradle
-          sed -i '/dependencies {/a\    implementation(name: "libbox", ext: "aar")' android/app/build.gradle
-          # Ensure minSdk >= 21
           sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 21/' android/app/build.gradle
 
       - run: flutter pub get

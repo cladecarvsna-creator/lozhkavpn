@@ -8,16 +8,10 @@ import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Log
-import io.nekohasekai.libbox.BoxService
-import io.nekohasekai.libbox.CommandServer
-import io.nekohasekai.libbox.CommandServerHandler
-import io.nekohasekai.libbox.InterfaceUpdateListener
-import io.nekohasekai.libbox.Libbox
-import io.nekohasekai.libbox.PlatformInterface
-import io.nekohasekai.libbox.StatusMessage
 import java.io.File
+import java.io.FileOutputStream
 
-class LozhkaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
+class LozhkaVpnService : VpnService() {
 
     companion object {
         const val TAG = "LozhkaVPN"
@@ -27,21 +21,21 @@ class LozhkaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
         var instance: LozhkaVpnService? = null
     }
 
-    private var boxService: BoxService? = null
-    private var commandServer: CommandServer? = null
+    private var process: Process? = null
+    private var tunFd: ParcelFileDescriptor? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             "START" -> {
                 val config = intent.getStringExtra("config") ?: return START_NOT_STICKY
-                startBox(config)
+                startTunnel(config)
             }
-            "STOP" -> stopBox()
+            "STOP" -> stopTunnel()
         }
         return START_STICKY
     }
 
-    private fun startBox(config: String) {
+    private fun startTunnel(config: String) {
         if (isRunning) return
         instance = this
 
@@ -54,89 +48,148 @@ class LozhkaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
             .build()
         startForeground(NOTIFICATION_ID, notification)
 
-        try {
-            val configDir = File(filesDir, "sing-box")
-            configDir.mkdirs()
-            File(configDir, "config.json").writeText(config)
+        // write config — remove tun inbound, use redirect/tproxy instead for non-root
+        val configDir = File(filesDir, "singbox")
+        configDir.mkdirs()
+        val configFile = File(configDir, "config.json")
 
-            Libbox.setup(configDir.absolutePath, configDir.absolutePath, configDir.absolutePath, false)
+        // modify config: replace tun with mixed inbound for proxy mode
+        val modifiedConfig = config
+            .replace("\"type\": \"tun\"", "\"type\": \"mixed\"")
+            .replace("\"tag\": \"tun-in\"", "\"tag\": \"mixed-in\"")
 
-            boxService = BoxService(config, this)
-            boxService?.start()
-
-            isRunning = true
-            Log.i(TAG, "sing-box started via libbox")
-        } catch (e: Exception) {
-            Log.e(TAG, "failed to start sing-box", e)
-            isRunning = false
-            stopSelf()
+        // build proxy-mode config with socks/http inbound
+        val proxyConfig = """
+        {
+            "log": {"level": "info", "timestamp": true},
+            "dns": {
+                "servers": [
+                    {"tag": "dns-remote", "address": "https://1.1.1.1/dns-query", "detour": "proxy"},
+                    {"tag": "dns-direct", "address": "https://77.88.8.8/dns-query", "detour": "direct"}
+                ],
+                "strategy": "prefer_ipv4"
+            },
+            "inbounds": [
+                {
+                    "type": "mixed",
+                    "tag": "mixed-in",
+                    "listen": "127.0.0.1",
+                    "listen_port": 2080,
+                    "sniff": true,
+                    "sniff_override_destination": true
+                }
+            ],
+            ${extractOutboundsAndRoute(config)}
         }
-    }
+        """.trimIndent()
 
-    private fun stopBox() {
-        try {
-            boxService?.close()
-        } catch (e: Exception) {
-            Log.e(TAG, "error stopping", e)
-        }
-        boxService = null
-        isRunning = false
-        instance = null
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
-    }
+        configFile.writeText(proxyConfig)
 
-    // PlatformInterface implementation
-    override fun autoDetectInterfaceControl(fd: Int) {
-        protect(fd)
-    }
-
-    override fun openTun(options: String): Int {
+        // Setup VPN to redirect traffic through local proxy
         val builder = Builder()
             .setSession("ложка")
-            .setMtu(9000)
+            .setMtu(1500)
             .addAddress("172.19.0.1", 30)
             .addRoute("0.0.0.0", 0)
             .addRoute("::", 0)
             .addDnsServer("1.1.1.1")
             .addDnsServer("8.8.8.8")
 
-        val fd = builder.establish() ?: throw Exception("failed to establish tun")
-        return fd.detachFd()
+        // exclude our own app to prevent loops
+        try {
+            builder.addDisallowedApplication(packageName)
+        } catch (_: Exception) {}
+
+        tunFd = builder.establish()
+        if (tunFd == null) {
+            Log.e(TAG, "failed to establish VPN")
+            stopSelf()
+            return
+        }
+
+        // extract and run sing-box binary
+        val singboxBin = extractBinary()
+        if (singboxBin == null) {
+            Log.e(TAG, "sing-box binary not found")
+            stopTunnel()
+            return
+        }
+
+        try {
+            val pb = ProcessBuilder(singboxBin, "run", "-c", configFile.absolutePath, "-D", configDir.absolutePath)
+            pb.directory(configDir)
+            pb.redirectErrorStream(true)
+            process = pb.start()
+
+            // protect the sing-box process sockets
+            Thread {
+                process?.inputStream?.bufferedReader()?.forEachLine { line ->
+                    Log.d(TAG, line)
+                    if (line.contains("started") || line.contains("inbound")) {
+                        isRunning = true
+                    }
+                }
+            }.start()
+
+            isRunning = true
+            Log.i(TAG, "sing-box started")
+        } catch (e: Exception) {
+            Log.e(TAG, "failed to start sing-box", e)
+            stopTunnel()
+        }
     }
 
-    override fun useProcFS(): Boolean = false
+    private fun extractOutboundsAndRoute(originalConfig: String): String {
+        // extract outbounds and route sections from original config
+        try {
+            val org = org.json.JSONObject(originalConfig)
+            val outbounds = org.optJSONArray("outbounds") ?: return ""
+            val route = org.optJSONObject("route")
+            val sb = StringBuilder()
+            sb.append("\"outbounds\": ${outbounds}")
+            if (route != null) {
+                sb.append(",\n\"route\": ${route}")
+            }
+            return sb.toString()
+        } catch (e: Exception) {
+            Log.e(TAG, "failed to parse config", e)
+            return "\"outbounds\": [{\"type\": \"direct\", \"tag\": \"proxy\"}, {\"type\": \"direct\", \"tag\": \"direct\"}, {\"type\": \"block\", \"tag\": \"block\"}, {\"type\": \"dns\", \"tag\": \"dns-out\"}]"
+        }
+    }
 
-    override fun findConnectionOwner(ipProtocol: Int, sourceAddress: String, sourcePort: Int, destinationAddress: String, destinationPort: Int): Int = -1
+    private fun extractBinary(): String? {
+        val extracted = File(filesDir, "sing-box")
+        if (extracted.exists() && extracted.canExecute()) return extracted.absolutePath
 
-    override fun packageNameByUid(uid: Int): String = ""
+        try {
+            assets.open("sing-box").use { input ->
+                FileOutputStream(extracted).use { output ->
+                    input.copyTo(output)
+                }
+            }
+            extracted.setExecutable(true, false)
+            return extracted.absolutePath
+        } catch (e: Exception) {
+            Log.e(TAG, "cannot extract sing-box binary", e)
+            return null
+        }
+    }
 
-    override fun uidByPackageName(packageName: String): Int = 0
+    private fun stopTunnel() {
+        try {
+            process?.destroy()
+            process?.waitFor()
+        } catch (_: Exception) {}
+        process = null
 
-    override fun usePlatformDefaultInterfaceMonitor(): Boolean = true
+        try { tunFd?.close() } catch (_: Exception) {}
+        tunFd = null
 
-    override fun startDefaultInterfaceMonitor(listener: InterfaceUpdateListener?) {}
-
-    override fun closeDefaultInterfaceMonitor(listener: InterfaceUpdateListener?) {}
-
-    override fun usePlatformInterfaceGetter(): Boolean = false
-
-    override fun getInterfaces(): String = ""
-
-    override fun underNetworkExtension(): Boolean = false
-
-    override fun includeAllNetworks(): Boolean = false
-
-    override fun readWIFIState(): String = ""
-
-    override fun clearDNSCache() {}
-
-    // CommandServerHandler
-    override fun serviceReload() {}
-
-    override fun getSystemProxyStatus(): StatusMessage = StatusMessage()
-
-    override fun setSystemProxyEnabled(enabled: Boolean) {}
+        isRunning = false
+        instance = null
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -148,8 +201,13 @@ class LozhkaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
         }
     }
 
+    override fun onRevoke() {
+        stopTunnel()
+        super.onRevoke()
+    }
+
     override fun onDestroy() {
-        stopBox()
+        stopTunnel()
         super.onDestroy()
     }
 }
