@@ -67,7 +67,7 @@ class _MainShellState extends State<MainShell> {
       body: IndexedStack(
         index: _tab,
         children: [
-          HomeScreen(onOpenServers: () => setState(() => _tab = 1)),
+          HomeScreen(onOpenServers: () => setState(() => _tab = 1), onOpenSettings: () => setState(() => _tab = 2)),
           const ServersScreen(),
           const SettingsScreen(),
         ],

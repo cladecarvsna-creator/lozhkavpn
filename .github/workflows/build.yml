@@ -5,6 +5,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+env:
+  SINGBOX_VERSION: "1.11.8"
+
 jobs:
   build-android:
     runs-on: ubuntu-latest
@@ -19,6 +22,24 @@ jobs:
           channel: stable
       - name: generate platform files
         run: flutter create --project-name lozhka --org com.lozhka --platforms android .
+
+      - name: copy native android sources
+        run: |
+          cp android-src/kotlin/com/lozhka/lozhka/MainActivity.kt android/app/src/main/kotlin/com/lozhka/lozhka/MainActivity.kt
+          cp android-src/kotlin/com/lozhka/lozhka/LozhkaVpnService.kt android/app/src/main/kotlin/com/lozhka/lozhka/LozhkaVpnService.kt
+
+      - name: patch AndroidManifest for VPN service
+        run: |
+          sed -i 's|</application>|<service android:name=".LozhkaVpnService" android:permission="android.permission.BIND_VPN_SERVICE" android:exported="false"><intent-filter><action android:name="android.net.VpnService"/></intent-filter></service></application>|' android/app/src/main/AndroidManifest.xml
+          sed -i 's|</manifest>|<uses-permission android:name="android.permission.INTERNET"/><uses-permission android:name="android.permission.FOREGROUND_SERVICE"/><uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/></manifest>|' android/app/src/main/AndroidManifest.xml
+
+      - name: download sing-box for android
+        run: |
+          mkdir -p android/app/src/main/assets
+          wget -q "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-android-arm64.tar.gz" -O /tmp/sb.tar.gz
+          tar xzf /tmp/sb.tar.gz -C /tmp
+          cp /tmp/sing-box-${SINGBOX_VERSION}-android-arm64/sing-box android/app/src/main/assets/sing-box
+
       - run: flutter pub get
       - run: flutter build apk --release
       - uses: actions/upload-artifact@v4
@@ -37,6 +58,15 @@ jobs:
         run: flutter create --project-name lozhka --org com.lozhka --platforms windows .
       - run: flutter pub get
       - run: flutter build windows --release
+
+      - name: download sing-box for windows
+        shell: pwsh
+        run: |
+          $url = "https://github.com/SagerNet/sing-box/releases/download/v${{ env.SINGBOX_VERSION }}/sing-box-${{ env.SINGBOX_VERSION }}-windows-amd64.zip"
+          Invoke-WebRequest -Uri $url -OutFile sb.zip
+          Expand-Archive sb.zip -DestinationPath sb
+          Copy-Item "sb/sing-box-${{ env.SINGBOX_VERSION }}-windows-amd64/sing-box.exe" "build/windows/x64/runner/Release/sing-box.exe"
+
       - uses: actions/upload-artifact@v4
         with:
           name: lozhka-windows
