@@ -99,11 +99,10 @@ class SingboxService {
     _winProcess = await Process.start(
       singboxPath,
       ['run', '-c', configPath],
-      mode: ProcessStartMode.detached,
     );
 
     _winProcess!.stdout.transform(utf8.decoder).listen((line) {
-      if (line.contains('started')) {
+      if (line.contains('started') || line.contains('inbound')) {
         _setStatus(SingboxStatus.running);
       }
     });
@@ -112,7 +111,6 @@ class SingboxService {
       debugPrint('[sing-box] $line');
     });
 
-    // give it a moment to start
     await Future.delayed(const Duration(seconds: 2));
     if (_status == SingboxStatus.starting) {
       _setStatus(SingboxStatus.running);
